@@ -1,0 +1,139 @@
+name: "TEMP: curiosity watchdog probe"
+
+# TEMPORARY racecar diagnostic -- DELETE AFTER USE. Not part of the testbed.
+#
+# Two instrumented Maven builds were SIGABRT'd (exit 134, core dumped) after a
+# single ~125-130s interval of no output, while instrumented builds of 263s and
+# 265s with continuous output survived. Real builds gave us nothing between 14s
+# and 125s, so the threshold is only bracketed as (14.2s, 125.4s].
+#
+# Part 1 walks a ladder of quiet durations to pin the threshold.
+# Part 2 holds duration fixed at 150s and varies WHAT the process does, to tell
+#   a wall-clock timer apart from an activity watchdog:
+#     quiet    -- idle, no CPU, no syscalls, no output   (nanosleep then nothing)
+#     busy-cpu -- CPU burning, no syscalls, no output    (bash builtins only)
+#     busy-sys -- CPU + heavy syscalls, no output        (dd through /dev/null)
+#     ticking  -- same 150s but prints every 10s         (output, little CPU)
+#   quiet dies + ticking lives            => it watches observable activity
+#   quiet+busy-cpu die + busy-sys lives   => it watches syscalls specifically
+#   all four die                          => plain wall-clock since process start
+#
+# Each probe runs as a CHILD process (`bash -c`) so the step's own shell survives
+# to report the exit status -- that is how the Maven aborts presented, with the
+# shell printing "Aborted (core dumped) mvn ...". rc=134 is SIGABRT.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token"
+        type: string
+        default: ""
+
+run-name: "TEMP probe ${{ inputs.racecar_run }}"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  probe:
+    name: watchdog probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          # instrumented arm only -- there is nothing to compare against here,
+          # the question is only where the instrumented arm starts dying
+          chalk: true
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          lfs: false
+
+      - name: Assert instrumentation is live
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
+      # own step => fresh shell AND fresh child, so a per-process timer cannot be
+      # confounded with the age of a long-lived step shell
+      - name: Part 1 - quiet 30s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 30"
+          echo "PROBE=quiet-30s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 1 - quiet 60s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 60"
+          echo "PROBE=quiet-60s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 1 - quiet 90s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 90"
+          echo "PROBE=quiet-90s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 1 - quiet 110s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 110"
+          echo "PROBE=quiet-110s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 1 - quiet 130s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 130"
+          echo "PROBE=quiet-130s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 1 - quiet 150s
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c "sleep 150"
+          echo "PROBE=quiet-150s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 2a - busy-cpu 150s (no syscalls, no output)
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c 'e=$((SECONDS+150)); while [ $SECONDS -lt $e ]; do :; done'
+          echo "PROBE=busy-cpu-150s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 2b - busy-syscall 150s (heavy syscalls, no output)
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c 'timeout 150 dd if=/dev/zero of=/dev/null bs=512 2>/dev/null'
+          echo "PROBE=busy-syscall-150s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Part 2c - ticking 150s (prints every 10s)
+        continue-on-error: true
+        run: |
+          set +e
+          s=$SECONDS
+          bash -c 'for i in $(seq 15); do echo "tick $i"; sleep 10; done'
+          echo "PROBE=ticking-150s rc=$? elapsed=$((SECONDS-s))s"
+
+      - name: Summary
+        if: always()
+        run: echo "rc=134 means SIGABRT. Compare Part 1 for the threshold and Part 2 for the trigger condition."
